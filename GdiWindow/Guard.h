@@ -51,7 +51,7 @@ struct Ref
 };
 
 template<typename T>
-struct OptionalRef : T
+struct OptionalRef
 {
 	OptionalRef(const OptionalRef &o) = delete;
 
@@ -108,7 +108,7 @@ struct OptionalRef : T
 };
 
 template<typename T>
-struct Guard : T
+struct Guard
 {
 	operator Ref<T>()
 	{
@@ -142,5 +142,42 @@ inline Ref<T> stealMutex(Ref<U> &o, T &t)
 	o.t = nullptr;
 	return std::move(result);
 }
+
+template<typename T>
+inline Ref<T> dereferenceAndEat(OptionalRef<T> &o)
+{
+	Ref<T> result(Ref<T>::MutexPreLocked, *o.m, *o.t);
+	o.m = nullptr;
+	o.t = nullptr;
+	return std::move(result);
+}
+
+
+template<typename Ref>
+inline void unlockMutex(Ref &ref)
+{
+	assert(ref.m);
+	ref.m->unlock();
+	ref.m = nullptr;
+	ref.t = nullptr;
+}
+
+struct InverseMutexGuard
+{
+	InverseMutexGuard(const InverseMutexGuard&) = delete;
+
+	InverseMutexGuard(std::mutex& mutex)
+		: mutex(mutex)
+	{
+		mutex.unlock();
+	}
+
+	~InverseMutexGuard()
+	{
+		mutex.lock();
+	}
+
+	std::mutex &mutex;
+};
 
 }

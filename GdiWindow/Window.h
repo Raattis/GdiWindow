@@ -2,18 +2,10 @@
 
 #include <string>
 #include <inttypes.h>
+#include "GdiTypes.h"
 
 namespace GdiWindow
 {
-
-struct Vector2
-{
-	float x = 0, y = 0;
-};
-struct Rect
-{
-	float x = 0, y = 0, w = 0, h = 0;
-};
 
 struct WindowHandle
 {
@@ -33,6 +25,7 @@ typedef void(*StartedDelegate)(const WindowHandle &windowHandle, void *hwnd);
 typedef void(*StoppingDelegate)(const WindowHandle &windowHandle, void *hwnd);
 typedef void(*PaintDelegate)(const WindowHandle &windowHandle, void *hwnd);
 typedef void(*MoveDelegate)(const WindowHandle &windowHandle, void *hwnd);
+typedef void(*ResizeDelegate)(const WindowHandle &windowHandle, void* hwnd);
 typedef int64_t(*MessageDelegate)(const WindowHandle &windowHandle, void *hwnd, uint32_t msg, uint64_t wParam, int64_t lParam);
 
 struct Window
@@ -41,6 +34,9 @@ struct Window
 	static void close(const WindowHandle &windowHandle);
 	static bool isOpen(const WindowHandle &windowHandle);
 	static bool exists(const WindowHandle &windowHandle);
+	static void *getHwnd(const WindowHandle &windowHandle);
+
+	static void repaint(const WindowHandle &windowHandle);
 
 	static void setRect(const WindowHandle &windowHandle, Rect rect);
 	static Rect getRect(const WindowHandle &windowHandle);
@@ -49,6 +45,7 @@ struct Window
 	static void registerStoppingDelegate(const WindowHandle &windowHandle, StoppingDelegate func);
 	static void registerPaintDelegate(const WindowHandle &windowHandle, PaintDelegate func);
 	static void registerMoveDelegate(const WindowHandle &windowHandle, MoveDelegate func);
+	static void registerResizeDelegate(const WindowHandle& windowHandle, ResizeDelegate func);
 	static void registerMessageDelegate(const WindowHandle &windowHandle, MessageDelegate func);
 };
 

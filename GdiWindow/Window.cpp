@@ -38,11 +38,12 @@ struct DelegateState
 	WindowHandle windowHandle;
 	HWND hwnd = nullptr;
 
-	StartedDelegate startedDelegate;
-	StoppingDelegate stoppingDelegate;
-	PaintDelegate paintDelegate;
-	MoveDelegate moveDelegate;
-	MessageDelegate messageDelegate;
+	StartedDelegate startedDelegate = nullptr;
+	StoppingDelegate stoppingDelegate = nullptr;
+	PaintDelegate paintDelegate = nullptr;
+	MoveDelegate moveDelegate = nullptr;
+	ResizeDelegate resizeDelegate = nullptr;
+	MessageDelegate messageDelegate = nullptr;
 };
 
 static Ref<std::map<WindowHandle, DelegateState>> getDelegateStateMap()
@@ -62,12 +63,34 @@ static OptionalRef<DelegateState> tryFindDelegateStateWithHwnd(HWND hwnd)
 	Ref<std::map<WindowHandle, DelegateState>> map = getDelegateStateMap();
 	for (auto it : *map.t)
 	{
-		DelegateState &state = it.second;
-		if (state.hwnd == hwnd)
-			return stealMutexOptional(map, state);
+		if (it.second.hwnd == hwnd)
+			return stealMutexOptional(map, map->operator[](it.first));
 	}
 
 	return OptionalRef<DelegateState>();
+}
+
+typedef void(*DelegateType)(const WindowHandle &windowHandle, void *hwnd);
+static void callDelegate(Ref<DelegateState> &state, DelegateType delegateObject, bool eatRef = true)
+{
+	if (!delegateObject)
+		return;
+
+	HWND hwnd = state->hwnd;
+	WindowHandle windowHandle = state->windowHandle;
+
+	if (eatRef)
+	{
+		state.m->unlock();
+		state.m = nullptr;
+		state.t = nullptr;
+		delegateObject(windowHandle, hwnd);
+	}
+	else
+	{
+		InverseMutexGuard ig(*state.m);
+		delegateObject(windowHandle, hwnd);
+	}
 }
 
 struct WindowThreadState
@@ -127,16 +150,44 @@ static Ref<WindowThreadState> getState(const WindowHandle &windowHandle)
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	int64_t result = 0;
-	if (OptionalRef<DelegateState> delegateState = tryFindDelegateStateWithHwnd(hwnd))
+	if (OptionalRef<DelegateState> delegateStateOptional = tryFindDelegateStateWithHwnd(hwnd))
 	{
+		Ref<DelegateState> delegateState = dereferenceAndEat(delegateStateOptional);
+
 		if (delegateState->messageDelegate)
 		{
-			result = delegateState->messageDelegate(delegateState->windowHandle, hwnd, msg, wParam, lParam);
+			MessageDelegate messageDelegate = delegateState->messageDelegate;
+			WindowHandle windowHandle = delegateState->windowHandle;
+			InverseMutexGuard ig(*delegateState.m);
+			messageDelegate(windowHandle, hwnd, msg, wParam, lParam);
 		}
+		
+		if (result == 0)
+		{
+			if (msg == WM_PAINT)
+			{
+				if (delegateState->paintDelegate)
+					callDelegate(delegateState, delegateState->paintDelegate);
+
+				return 0;
+			}
+			else if (msg == WM_MOVE)
+			{
+				if (delegateState->moveDelegate)
+					callDelegate(delegateState, delegateState->moveDelegate);
+			}
+			else if (msg == WM_SIZE)
+			{
+				if (delegateState->resizeDelegate)
+					callDelegate(delegateState, delegateState->resizeDelegate);
+			}
+		}
+
 	}
 
 	switch (msg)
 	{
+
 	case WM_CLOSE:
 		DestroyWindow(hwnd);
 		return result;
@@ -253,9 +304,13 @@ static void windowThread(WindowHandle windowHandle)
 		state->hasOpened = true;
 		state->hwnd = hwnd;
 	}
-	
-	getDelegateState(windowHandle)->hwnd = hwnd;
-	getDelegateState(windowHandle)->startedDelegate(windowHandle, hwnd);
+
+	{
+		Ref<DelegateState> state = getDelegateState(windowHandle);
+		state->windowHandle = windowHandle;
+		state->hwnd = hwnd;
+		callDelegate(state, state->startedDelegate);
+	}
 
 	while (true)
 	{
@@ -270,7 +325,7 @@ static void windowThread(WindowHandle windowHandle)
 			}
 		}
 
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		sleep(10);
 
 		bool closingRequested = false;
 		{
@@ -300,8 +355,11 @@ static void windowThread(WindowHandle windowHandle)
 			break;
 	}
 
-	getDelegateState(windowHandle)->stoppingDelegate(windowHandle, hwnd);
-	getDelegateState(windowHandle)->hwnd = nullptr;
+	{
+		Ref<DelegateState> state = getDelegateState(windowHandle);
+		callDelegate(state, state->stoppingDelegate, false);
+		state->hwnd = nullptr;
+	}
 
 	CloseWindow(hwnd);
 
@@ -343,19 +401,21 @@ void Window::open(const WindowHandle &windowHandle)
 			if (it == map->map.end())
 				break;
 
+
 			if (mightAlreadyBeOpen)
 			{
-				if (!it->second->isClosing)
+				Ref<WindowThreadState> windowThreadState = *it->second;
+				if (!windowThreadState->isClosing)
 					return;
 			}
 			else
 			{
-				assert(it->second->isClosing);
+				assert((*it->second)->isClosing);
 			}
 
 			map.m->unlock();
 
-			std::this_thread::sleep_for(std::chrono::milliseconds(wait));
+			sleep(wait);
 			wait++;
 
 			map.m->lock();
@@ -387,6 +447,32 @@ bool Window::exists(const WindowHandle &windowHandle)
 	return map->map.find(windowHandle) != map->map.end();
 }
 
+void *Window::getHwnd(const WindowHandle &windowHandle)
+{
+	Ref<WindowThreadStateMap> map = getMap();
+	auto it = map->map.find(windowHandle);
+	if (it != map->map.end())
+	{
+		Ref<WindowThreadState> windowThreadState = *it->second;
+		return windowThreadState->hwnd;
+	}
+
+	return nullptr;
+}
+
+
+void Window::repaint(const WindowHandle& windowHandle)
+{
+	HWND hwnd = nullptr;
+	if (OptionalRef<WindowThreadState> state = tryGetState(windowHandle))
+	{
+		hwnd = state->hwnd;
+	}
+
+	if (hwnd)
+		RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE);
+}
+
 void Window::setRect(const WindowHandle &windowHandle, Rect rect)
 {
 
@@ -412,9 +498,14 @@ void Window::registerPaintDelegate(const WindowHandle &windowHandle, PaintDelega
 	getDelegateState(windowHandle)->paintDelegate = func;
 }
 
-void Window::registerMoveDelegate(const WindowHandle &windowHandle, MoveDelegate func)
+void Window::registerMoveDelegate(const WindowHandle& windowHandle, MoveDelegate func)
 {
 	getDelegateState(windowHandle)->moveDelegate = func;
+}
+
+void Window::registerResizeDelegate(const WindowHandle& windowHandle, ResizeDelegate func)
+{
+	getDelegateState(windowHandle)->resizeDelegate = func;
 }
 
 void Window::registerMessageDelegate(const WindowHandle &windowHandle, MessageDelegate func)
